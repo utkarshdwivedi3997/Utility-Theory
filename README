@@ -1,0 +1,4 @@
+A repo containing my Unity project in which I'm researching Utility Theory.
+Using two types of enemy "clans," I'm trying to achieve a behaviour from these enemies that can reflect realistic human behaviours.
+
+The main script which handles all the AI is "enemyController_noUI", found in Assets/Scripts folder.
