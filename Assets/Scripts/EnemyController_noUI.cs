@@ -15,7 +15,7 @@ public class EnemyController_noUI : MonoBehaviour
 
     private enum STATE { IDLE, HEAL, ENGAGE, COVER, RUN, HIDE };        // AI states
     private STATE currState;                                            // The current AI state
-    public float moveSpeed;
+    public float moveSpeed;                                             // Speed of movement
 
     // Enemy attributes
 
@@ -31,20 +31,22 @@ public class EnemyController_noUI : MonoBehaviour
 
     public float lookForCoverDistance = 20f;                            // Radius of cover search
     private GameObject closestCover = null;                             // The closest cover gameobject - starts with null
+    private Vector3 closestCoverPos;
     public LayerMask whatIsCover;                                       // Which layers to search for to find cover
+    private int coverStatus = 1;                                        // 0 = in cover, 1 = not in cover, looking for one
+    Dictionary<Vector3, float> coverRiskLevels = new Dictionary<Vector3, float>();        // float - risk level of the current cover position being tested, GameObject - the actual position that is being tested
+    public Camera myCam;
+    private Plane[] planes;
 
-
-    //public Slider an, aw, he, co, en;
     private bool isPaused = false;                                      // The game isn't paused at the start
     public Image healthBar;                                             // Health UI
+    public GameObject coverValueCanvas;                                     // Panel to handle cover value display
 
     // Different values denoting some specific status of this enemy
     public float health, nEnemies, distanceToCover, maxAnxiousDistance, distanceToClosestEnemy, exhaustion;
 
-    private float anxiety, awareness;
-    private float p_heal, p_cover, p_engage, p_run, p_hide;         //p_ denotes priority float values. All values lie between 0-1.
-
-    Dictionary<Text, float> priorities = new Dictionary<Text, float>();     // This is just to change values from the UI
+    private float anxiety, awareness, coverNeed, coverPossibility;      // values needed to calculate priorities
+    private float p_heal, p_cover, p_engage, p_run, p_hide;             // p_ denotes priority float values. All values lie between 0-1.
 
     // Use this for initialization
     void Start()
@@ -71,7 +73,7 @@ public class EnemyController_noUI : MonoBehaviour
     }
 
     // Update is called once per frame
-    void Update()
+    void FixedUpdate()
     {
         //CalculatePriorities();
 
@@ -81,7 +83,6 @@ public class EnemyController_noUI : MonoBehaviour
         {
             isPaused = !isPaused;
         }
-
     }
 
     private void UpdateState()
@@ -110,7 +111,15 @@ public class EnemyController_noUI : MonoBehaviour
                 EngageEnemy();
                 break;
             case STATE.COVER:
-                myNav.destination = closestCover.transform.position;
+                //if (closestCover != null)
+                {
+                    if (closestCoverPos!=null)
+                    {
+                        myNav.destination = closestCoverPos;
+                        //Debug.DrawLine(myNav.transform.position, closestCoverPos, Color.cyan, 1f);
+                    }
+                    //myNav.destination = closestCover.transform.position;
+                }
                 myNav.isStopped = false;
                 GetToCover();
                 break;
@@ -119,14 +128,19 @@ public class EnemyController_noUI : MonoBehaviour
     private void CalculatePriorities()
     {
         // Update all values necessary for priority calculation
+        planes = GeometryUtility.CalculateFrustumPlanes(myCam);     // calculate camera frustrum planes every frame
+
         UpdateDistanceToClosestEnemy();
-        FindCover();
-
-
-        // Actually calculate the values
+        closestCoverPos = FindCover();
+        Debug.Log(closestCoverPos);
+        // Calculate priorities
         p_heal = 1 / (1 + Mathf.Exp(0.2f * (health - 30f)));                                                            //Priority to heal      -- S curve (Logistic function)
         p_engage = Mathf.Pow(maxAnxiousDistance - distanceToClosestEnemy, 3f) / Mathf.Pow(maxAnxiousDistance, 3f);      //Exponential function
-        p_cover = 1 - Mathf.Pow(100 - (p_heal * p_engage) * 100, 3f) / Mathf.Pow(100, 3f);                              //Try this? ((p_heal * 2.5f) + (p_engage * 2.5f)) / 4f;
+
+        coverNeed = 1 - Mathf.Pow(100 - (p_heal * p_engage) * 100, 3f) / Mathf.Pow(100, 3f);                            //Need to take cover. Depends on priority to heal and engage
+        coverPossibility = 1 / (1 + Mathf.Exp(0.11f * (distanceToCover - 60f)));                                        //Is taking cover even possible?
+        p_cover = coverNeed * coverPossibility * coverStatus;
+
         anxiety = (p_engage + (Mathf.Pow(nEnemies, 3f) / Mathf.Pow(100, 3f)) * 2f) / 3f;                                //Anxieity curve - both number of enemies and distance to enemies taken into account -- Exponential function - change power number to change steepness of curve
         awareness = 1 / (1 + Mathf.Exp(0.11f * (exhaustion - 50f)));                                                    //Depends on fatique/exhaustion level
 
@@ -134,7 +148,7 @@ public class EnemyController_noUI : MonoBehaviour
         float[] arr = { p_heal, p_engage, p_cover };
         float maxVal = Mathf.Max(arr);
 
-        float THRESHOLD = 0.0035f;
+        float THRESHOLD = 0.0035f;          // Float calculations are messy
 
         // Switch states depending on the highest priority
         if (maxVal > THRESHOLD)
@@ -163,8 +177,11 @@ public class EnemyController_noUI : MonoBehaviour
     /// <summary>
     /// Finds the closest cover and the distance to it.
     /// </summary>
-    private void FindCover()
+    private Vector3 FindCover()
     {
+        List<GameObject> c = new List<GameObject>();
+        coverRiskLevels = new Dictionary<Vector3, float>();
+
         float minDistance = lookForCoverDistance + 1000;
         Collider[] hitColliders = Physics.OverlapSphere(transform.position, lookForCoverDistance, whatIsCover);
         if (hitColliders.Length > 0)
@@ -175,9 +192,133 @@ public class EnemyController_noUI : MonoBehaviour
                 {
                     minDistance = Vector3.Distance(hit.transform.position, transform.position);
                     closestCover = hit.gameObject;
+                    distanceToCover = minDistance;
+
+                    //BoxCollider col = closestCover.GetComponent<BoxCollider>();
+                    //col.size = col.size * 2;
+                    Vector3 halfExtents = closestCover.transform.localScale;//GetComponent<Collider>().bounds.extents;
+                    Debug.Log(halfExtents);
+                    Vector3 startVec = new Vector3(closestCover.transform.position.x - halfExtents.x, closestCover.transform.position.y, closestCover.transform.position.z - halfExtents.z);
+                    Vector3 endVec = new Vector3(closestCover.transform.position.x + halfExtents.x, closestCover.transform.position.y, closestCover.transform.position.z + halfExtents.z);
+
+                    //Vector3 vec2 = new Vector3(closestCover.transform.position.x - halfExtents.x, closestCover.transform.position.y, closestCover.transform.position.z + halfExtents.z);
+                    //Vector3 vec3 = new Vector3(closestCover.transform.position.x + halfExtents.x, closestCover.transform.position.y, closestCover.transform.position.z - halfExtents.z);
+
+                    //Debug.DrawLine(startVec, vec2, Color.red, 0.5f);
+                    //Debug.DrawLine(vec2, vec3, Color.blue, 0.5f);
+                    //Debug.DrawLine(endVec, vec2, Color.green, 0.5f);
+                    //Debug.DrawLine(endVec, vec3, Color.black, 0.5f);
+                    //Debug.DrawLine(closestCover.transform.position, endVec, Color.red, 0.5f);
+
+                    // Check to see if enemies are near this cover
+
+                    Collider[] cols = Physics.OverlapBox(closestCover.transform.position, halfExtents, closestCover.transform.rotation, whatIsEnemy);
+                    List<Collider> enemyCols = new List<Collider>();
+
+                    foreach (Collider col in cols)                      // Get all enemy hits
+                    {
+                        if (col.gameObject.tag.Equals("Enemy" + suffix))
+                        {
+                            enemyCols.Add(col);
+                        }
+                    }
+
+                    if (enemyCols.Count > 0)           // Make a box a little bigger than the size of the cover and check if enemy is in it
+                    {
+                        List<Vector3> possibleCoverAreas = GroundGrid.Instance.GetPointsInCube(startVec.x,startVec.z,endVec.x,endVec.z);
+
+                        foreach (Vector3 area in possibleCoverAreas)
+                        {
+                            // If this area has not been checked yet
+                            //if (coverRiskLevels.ContainsKey(area) == false)
+                            {
+                                float priorityForCover = 0;
+                                //Debug.DrawLine(transform.position, area, Color.green, 0.5f);
+                                // If this area is within the mesh itself
+                                if (closestCover.GetComponent<Collider>().bounds.Contains(area))
+                                {
+                                    coverRiskLevels.Add(area, priorityForCover);
+                                    continue;
+                                }
+                                else
+                                {
+                                    Debug.DrawLine(transform.position, area, Color.green, 0.5f);
+                                    //myCam.transform.position = new Vector3(area.x, myCam.transform.position.y, area.z);
+                                    //myCam.transform.LookAt(closestCover.transform.position);
+
+                                    float enemyNum = 0;
+                                    foreach (Collider enemy in enemyCols)
+                                    {
+                                        if (GeometryUtility.TestPlanesAABB(planes, enemy.bounds))
+                                        {
+                                            if (IsEnemyInSight(enemy))
+                                            {
+                                                if (suffix!="_A")
+                                                Debug.Log("enemy seen");
+                                                enemyNum++;
+                                            }
+                                            else
+                                            {
+                                                if (suffix!="_A")
+                                                Debug.Log("clear!!");
+                                            }
+                                        }
+                                        else
+                                        {
+
+                                        }
+                                    }
+
+                                    priorityForCover = Mathf.Pow((10 - enemyNum), 3) / Mathf.Pow(10, 3);
+                                    coverRiskLevels.Add(area, priorityForCover);
+                                }
+                            }
+                        }
+                        //distanceToCover = 0;
+                        //closestCover = null;
+                        //minDistance = lookForCoverDistance + 1000;
+
+                        //c.Add(Instantiate(coverValueCanvas, hit.transform.position + Vector3.up * 4f, Quaternion.identity));
+                    }
                 }
             }
         }
+
+        // Return cover with highest priority
+        if (coverRiskLevels.Count > 0)
+        {
+            float highestCoverValue = 0;
+            foreach (KeyValuePair<Vector3, float> kvp in coverRiskLevels)
+            {
+                if (kvp.Value > highestCoverValue)
+                {
+                    highestCoverValue = kvp.Value;
+                }
+            }
+
+            foreach (KeyValuePair<Vector3, float> kvp in coverRiskLevels)
+            {
+                if (kvp.Value >= highestCoverValue)
+                {
+                    //closestCover = kvp.Key;
+                    Debug.Log("actual pos");
+                    return kvp.Key;
+                }
+            }
+        }
+        return closestCover.transform.position;
+    }
+
+    private bool IsEnemyInSight(Collider enemy)
+    {
+        RaycastHit hit;
+        Debug.DrawRay(myCam.transform.position, transform.forward * 10, Color.blue);
+        if (Physics.Raycast(myCam.transform.position, transform.forward, out hit, 10))
+        {
+            if (hit.collider == enemy)
+                return true;
+        }
+        return false;
     }
 
     /// <summary>
@@ -215,14 +356,27 @@ public class EnemyController_noUI : MonoBehaviour
     /// </summary>
     private void GetToCover()
     {
-        if (Vector3.Distance(transform.position, closestCover.transform.position) <= 0.8f)
+        if (myNav.remainingDistance <= 0.2f)
         {
             myNav.isStopped = true;
+            closestCover = null;
+            coverStatus = 0;
+            StartCoroutine(ResetCoverStatus());
         }
         else
         {
+            Debug.DrawLine(myNav.transform.position, myNav.destination, Color.cyan);
             myNav.isStopped = false;
         }
+    }
+
+    /// <summary>
+    /// Resets cover status so that AI starts looking for cover again
+    /// </summary>
+    IEnumerator ResetCoverStatus()
+    {
+        yield return new WaitForSeconds(3);
+        coverStatus = 1;
     }
 
     /// <summary>
@@ -266,29 +420,11 @@ public class EnemyController_noUI : MonoBehaviour
         }
     }
 
-    /* ---------------- Getters and Setters follow ---------------- */
-
-    public void changeFatigue(float val)
+    /* ------------------- Colliders and Bounding box debug wireframes ------------------- */
+    void DrawDebugBox(Vector3 extents, Transform center)
     {
-        exhaustion = val;
-        CalculatePriorities();
-    }
-
-    public void changeHealth(float val)
-    {
-        health = val;
-        CalculatePriorities();
-    }
-
-    public void changeNumEnemies(float val)
-    {
-        nEnemies = val;
-        CalculatePriorities();
-    }
-
-    public void changeDistance(float val)
-    {
-        distanceToClosestEnemy = val;
-        CalculatePriorities();
+        Gizmos.color = Color.cyan;
+        Gizmos.DrawWireCube(closestCover.transform.position, closestCover.GetComponent<Collider>().bounds.size * 2f);
     }
 }
+ 
